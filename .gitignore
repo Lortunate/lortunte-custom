@@ -1,0 +1,6 @@
+# Scoop cache
+*.lock
+
+# Windows
+Thumbs.db
+Desktop.ini

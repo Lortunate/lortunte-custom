@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate bucket manifests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $errors = 0
+
+          $files = Get-ChildItem bucket/*.json | Sort-Object Name
+          if (-not $files) {
+            Write-Error "No manifests found in bucket/."
+            exit 1
+          }
+
+          $badNames = $files | Where-Object { $_.BaseName -cne $_.BaseName.ToLowerInvariant() }
+          if ($badNames) {
+            $badNames | ForEach-Object { Write-Error "Manifest filename must be lowercase: $($_.Name)" }
+            $errors++
+          }
+
+          $required = @('version', 'description', 'homepage', 'license')
+
+          foreach ($file in $files) {
+            $manifestErrors = @()
+
+            try {
+              $raw = Get-Content $file.FullName -Raw
+              $manifest = $raw | ConvertFrom-Json -Depth 100
+            } catch {
+              Write-Error "Invalid JSON: $($file.Name) - $_"
+              $errors++
+              continue
+            }
+
+            foreach ($key in $required) {
+              if ([string]::IsNullOrWhiteSpace([string]$manifest.$key)) {
+                $manifestErrors += "missing '$key'"
+              }
+            }
+
+            if (-not $manifest.url -and -not $manifest.architecture) {
+              $manifestErrors += "missing 'url' or 'architecture'"
+            }
+
+            if ($manifest.url -and -not $manifest.hash) {
+              $manifestErrors += "top-level 'url' is missing matching 'hash'"
+            }
+
+            if ($manifest.architecture) {
+              foreach ($arch in $manifest.architecture.PSObject.Properties) {
+                if (-not $arch.Value.url) {
+                  $manifestErrors += "architecture.$($arch.Name) is missing 'url'"
+                }
+                if (-not $arch.Value.hash) {
+                  $manifestErrors += "architecture.$($arch.Name) is missing 'hash'"
+                }
+              }
+            }
+
+            if ($raw -match 'example\.com') {
+              $manifestErrors += "contains placeholder domain 'example.com'"
+            }
+            if ($raw -match '"hash"\s*:\s*"sha256:0{64}"' -or $raw -match '"hash"\s*:\s*"0{64}"') {
+              $manifestErrors += "contains placeholder hash value"
+            }
+
+            if ($manifestErrors.Count -gt 0) {
+              Write-Error "Invalid manifest: $($file.Name) - $($manifestErrors -join '; ')"
+              $errors++
+            } else {
+              Write-Host "OK: $($file.Name)"
+            }
+          }
+
+          exit $errors
